@@ -1,0 +1,386 @@
+package com.example.myapplication
+
+import android.Manifest
+import android.annotation.SuppressLint
+import android.content.pm.PackageManager
+import android.os.Bundle
+import android.util.Log
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.Button
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextField
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.app.ActivityCompat
+import com.mapbox.api.directions.v5.models.RouteOptions
+import com.mapbox.geojson.Point
+import com.mapbox.maps.CameraOptions
+import com.mapbox.maps.EdgeInsets
+import com.mapbox.maps.MapView
+import com.mapbox.maps.plugin.LocationPuck2D
+import com.mapbox.maps.plugin.animation.camera
+import com.mapbox.maps.plugin.locationcomponent.location
+import com.mapbox.navigation.base.ExperimentalPreviewMapboxNavigationAPI
+import com.mapbox.navigation.base.extensions.applyDefaultNavigationOptions
+import com.mapbox.navigation.base.options.NavigationOptions
+import com.mapbox.navigation.base.route.NavigationRoute
+import com.mapbox.navigation.base.route.NavigationRouterCallback
+import com.mapbox.navigation.base.route.RouterFailure
+import com.mapbox.navigation.core.MapboxNavigation
+import com.mapbox.navigation.core.directions.session.RoutesObserver
+import com.mapbox.navigation.core.lifecycle.MapboxNavigationApp
+import com.mapbox.navigation.core.lifecycle.MapboxNavigationObserver
+import com.mapbox.navigation.core.lifecycle.requireMapboxNavigation
+import com.mapbox.navigation.core.trip.session.LocationMatcherResult
+import com.mapbox.navigation.core.trip.session.LocationObserver
+import com.mapbox.navigation.ui.maps.camera.NavigationCamera
+import com.mapbox.navigation.ui.maps.camera.data.MapboxNavigationViewportDataSource
+import com.mapbox.navigation.ui.maps.location.NavigationLocationProvider
+import com.mapbox.navigation.ui.maps.route.line.api.MapboxRouteLineApi
+import com.mapbox.navigation.ui.maps.route.line.api.MapboxRouteLineView
+import com.mapbox.navigation.ui.maps.route.line.model.MapboxRouteLineApiOptions
+import com.mapbox.navigation.ui.maps.route.line.model.MapboxRouteLineViewOptions
+
+class MainActivity : ComponentActivity() {
+    private lateinit var viewportDataSource: MapboxNavigationViewportDataSource
+    private lateinit var navigationCamera: NavigationCamera
+    private lateinit var routeLineApi: MapboxRouteLineApi
+    private lateinit var routeLineView: MapboxRouteLineView
+    private val navigationLocationProvider = NavigationLocationProvider()
+
+    // Переменные для хранения координат пользователя и пункта назначения
+    private var userLocation: Point? = null
+    private var destinationLocation: Point? = null
+    private var hasSetInitialCamera = false
+
+    // Флаг, указывающий, следует ли камере за пользователем
+    private var isFollowingUser = false
+
+    // Activity result launcher для запроса разрешений на геолокацию
+    private val locationPermissionRequest =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
+            when {
+                permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true -> {
+                    // Разрешения получены, можно инициализировать карту
+                    // Инициализация карты перенесена в Compose
+                }
+                else -> {
+                    Toast.makeText(
+                        this,
+                        "Location permissions denied. Please enable permissions in settings.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    updateCameraToUserLocation()
+                }
+            }
+        }
+
+    @OptIn(ExperimentalPreviewMapboxNavigationAPI::class)
+    private val mapboxNavigation: MapboxNavigation by
+    requireMapboxNavigation(
+        onResumedObserver = object : MapboxNavigationObserver {
+            //@SuppressLint("MissingPermission")
+            @SuppressLint("MissingPermission")
+            override fun onAttached(mapboxNavigation: MapboxNavigation) {
+                // Регистрируем наблюдателей маршрутов и локации
+                mapboxNavigation.registerRoutesObserver(routesObserver)
+                mapboxNavigation.registerLocationObserver(locationObserver)
+                mapboxNavigation.startTripSession() // Запускаем GPS-трекинг
+            }
+
+            override fun onDetached(mapboxNavigation: MapboxNavigation) {}
+        },
+        onInitialize = this::initNavigation
+    )
+
+    // Инициализация MapboxNavigation
+    @OptIn(ExperimentalPreviewMapboxNavigationAPI::class)
+    private fun initNavigation() {
+        MapboxNavigationApp.setup(NavigationOptions.Builder(this).build())
+        // Пример использования LocationEngineProvider после добавления импорта:
+        // val locationEngine = LocationEngineProvider.getBestLocationEngine(this)
+    }
+
+    // Наблюдатель маршрутов для отрисовки маршрута на карте
+    private val routesObserver = RoutesObserver { routeUpdateResult ->
+        if (routeUpdateResult.navigationRoutes.isNotEmpty()) {
+            routeLineApi.setNavigationRoutes(routeUpdateResult.navigationRoutes) { value ->
+                // Отрисовка маршрута на карте
+                routeLineView.renderRouteDrawData(mapView?.mapboxMap?.style ?: return@setNavigationRoutes, value)
+            }
+            viewportDataSource.onRouteChanged(routeUpdateResult.navigationRoutes.first())
+            viewportDataSource.evaluate()
+
+            // Если включено следование за пользователем, камера будет следовать
+            if (isFollowingUser) {
+                navigationCamera.requestNavigationCameraToFollowing()
+            } else {
+                navigationCamera.requestNavigationCameraToOverview()
+            }
+        }
+    }
+
+    // Наблюдатель локации для обновления положения пользователя и камеры
+    private val locationObserver = object : LocationObserver {
+        override fun onNewRawLocation(rawLocation: com.mapbox.common.location.Location) {}
+
+        override fun onNewLocationMatcherResult(locationMatcherResult: LocationMatcherResult) {
+            val enhancedLocation = locationMatcherResult.enhancedLocation
+
+            // Обновляем положение location puck на карте
+            navigationLocationProvider.changePosition(
+                location = enhancedLocation,
+                keyPoints = locationMatcherResult.keyPoints,
+            )
+            // Лог координат пользователя
+            Log.d("LOCATION", "User: ${enhancedLocation.latitude}, ${enhancedLocation.longitude}")
+
+            // Сохраняем координаты пользователя
+            val newUserLocation = Point.fromLngLat(enhancedLocation.longitude, enhancedLocation.latitude)
+            val wasNull = userLocation == null
+            userLocation = newUserLocation
+
+            // Обновляем viewportDataSource для камеры
+            viewportDataSource.onLocationChanged(enhancedLocation)
+            viewportDataSource.evaluate()
+
+            // Устанавливаем камеру при первом получении местоположения
+            if (wasNull) {
+                updateCameraToUserLocation()
+                hasSetInitialCamera = true
+
+                // Принудительное обновление позиции puck
+                mapView?.location?.locationPuck = LocationPuck2D()
+                mapView?.location?.enabled = true
+            }
+
+            // Если установлен флаг следования за пользователем и есть маршрут, камера следует за пользователем
+            if (isFollowingUser && mapboxNavigation.getNavigationRoutes().isNotEmpty()) {
+                navigationCamera.requestNavigationCameraToFollowing()
+            }
+        }
+    }
+
+    // Переменная для хранения MapView в Compose
+    private var mapView: MapView? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        // Проверяем разрешения на геолокацию
+        val hasLocationPermission = ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        if (!hasLocationPermission) {
+            locationPermissionRequest.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)) //COARES
+        }
+
+        setContent {
+            val context = LocalContext.current
+
+            // Состояния для полей ввода широты и долготы пункта назначения
+            var destLat by remember { mutableStateOf("") }
+            var destLng by remember { mutableStateOf("") }
+
+            // Compose UI
+            Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+                // Карта через AndroidView
+                AndroidView(
+                    factory = {
+                        MapView(it).also { mv ->
+                            mapView = mv
+
+                            // Инициализация компонентов карты
+                            mv.getMapboxMap().setCamera(
+                                CameraOptions.Builder()
+                                    .center(Point.fromLngLat(-122.43539772352648, 37.77440680146262))
+                                    .zoom(14.0)
+                                    .build()
+                            )
+
+                            // Инициализация viewportDataSource и navigationCamera
+                            viewportDataSource = MapboxNavigationViewportDataSource(mv.getMapboxMap())
+
+                            val pixelDensity = resources.displayMetrics.density
+                            viewportDataSource.followingPadding = EdgeInsets(
+                                180.0 * pixelDensity,
+                                40.0 * pixelDensity,
+                                150.0 * pixelDensity,
+                                40.0 * pixelDensity
+                            )
+
+                            navigationCamera = NavigationCamera(mv.getMapboxMap(), mv.camera, viewportDataSource)
+
+                            routeLineApi = MapboxRouteLineApi(MapboxRouteLineApiOptions.Builder().build())
+                            routeLineView = MapboxRouteLineView(MapboxRouteLineViewOptions.Builder(context).build())
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                ) { mv ->
+                    // Настройка location puck и провайдера локации после создания mapView   COARSE
+                    if (ActivityCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                        mv.location.apply {
+                            setLocationProvider(navigationLocationProvider)
+                            locationPuck = LocationPuck2D(
+                                bearingImage = null,
+                                shadowImage = null,
+                                scaleExpression = null
+                            ) // включаем отображение текущего положения
+                            puckBearingEnabled = true // включаем направление движения
+                            enabled = true
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Поля ввода широты и долготы пункта назначения
+                TextField(
+                    value = destLat,
+                    onValueChange = { destLat = it },
+                    label = { Text("Широта пункта назначения") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                TextField(
+                    value = destLng,
+                    onValueChange = { destLng = it },
+                    label = { Text("Долгота пункта назначения") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Button(
+                        onClick = {
+                            // Проверка разрешений
+                            if (ActivityCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                                Toast.makeText(context, "Разрешения на геолокацию не предоставлены", Toast.LENGTH_LONG).show()
+                                return@Button
+                            }
+
+                            // Проверка координат пользователя и назначения
+                            val userLoc = userLocation
+                            if (userLoc == null) {
+                                Toast.makeText(context, "Текущее местоположение не определено", Toast.LENGTH_LONG).show()
+                                return@Button
+                            }
+
+                            val lat = destLat.toDoubleOrNull()
+                            val lng = destLng.toDoubleOrNull()
+                            if (lat == null || lng == null || lat !in -90.0..90.0 || lng !in -180.0..180.0) {
+                                Toast.makeText(context, "Введите корректные координаты пункта назначения", Toast.LENGTH_LONG).show()
+                                return@Button
+                            }
+
+                            destinationLocation = Point.fromLngLat(lng, lat)
+
+                            // Запрос маршрута
+                            mapboxNavigation.requestRoutes(
+                                RouteOptions.builder()
+                                    .applyDefaultNavigationOptions()
+                                    .coordinatesList(listOf(userLoc, destinationLocation!!))
+                                    .layersList(listOf(mapboxNavigation.getZLevel(), null))
+                                    .build(),
+                                object : NavigationRouterCallback {
+                                    override fun onCanceled(routeOptions: RouteOptions, routerOrigin: String) {}
+
+                                    override fun onFailure(reasons: List<RouterFailure>, routeOptions: RouteOptions) {
+                                        Toast.makeText(context, "Не удалось построить маршрут", Toast.LENGTH_LONG).show()
+                                    }
+
+                                    override fun onRoutesReady(routes: List<NavigationRoute>, routerOrigin: String) {
+                                        if (routes.isNotEmpty()) {
+                                            mapboxNavigation.setNavigationRoutes(routes)
+                                            // Включаем следование за пользователем при построении маршрута
+                                            isFollowingUser = true
+                                        }
+                                    }
+                                }
+                            )
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Показать маршрут")
+                    }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    Button(
+                        onClick = {
+                            clearRoute()
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Отменить маршрут")
+                    }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    Button(
+                        onClick = { updateCameraToUserLocation() },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Обновить позицию")
+                    }
+                }
+            }
+        }
+
+        if (!hasLocationPermission) {
+            updateCameraToUserLocation()
+        }
+    }
+
+    /**
+     * Функция для очистки маршрута с карты и сброса состояния
+     */
+    private fun clearRoute() {
+        mapboxNavigation.setNavigationRoutes(emptyList())
+        isFollowingUser = false
+        destinationLocation = null
+        viewportDataSource.clearRouteData()
+        viewportDataSource.evaluate()
+        navigationCamera.requestNavigationCameraToIdle()
+    }
+
+    private fun updateCameraToUserLocation() {
+        val userLoc = userLocation
+        if (userLoc != null) {
+            mapView?.mapboxMap?.setCamera(
+                CameraOptions.Builder()
+                    .center(userLoc)
+                    .zoom(14.0)
+                    .build()
+            )
+        } else {
+            // Если местоположение неизвестно — фокус на Москве
+            mapView?.mapboxMap?.setCamera(
+                CameraOptions.Builder()
+                    .center(Point.fromLngLat(37.6173, 55.7558)) // Москва
+                    .zoom(10.0)
+                    .build()
+            )
+            Toast.makeText(this, "Местоположение не определено, показан центр Москвы", Toast.LENGTH_LONG).show()
+        }
+    }
+}
