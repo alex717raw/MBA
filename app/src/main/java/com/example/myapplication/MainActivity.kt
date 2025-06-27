@@ -1,281 +1,281 @@
 package com.example.myapplication
 
-import android.graphics.Color
+import android.Manifest
+import android.annotation.SuppressLint
+import android.content.pm.PackageManager
 import android.os.Bundle
-import android.widget.Toast
+import android.os.Handler
+import android.os.Looper
+import android.text.InputType
+import android.view.Gravity
+import android.widget.*
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.MyLocation
-import androidx.compose.material3.FloatingActionButton
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextField
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.unit.dp
-import com.mapbox.android.core.permissions.PermissionsListener
-import com.mapbox.android.core.permissions.PermissionsManager
-import com.mapbox.api.directions.v5.DirectionsCriteria
-import com.mapbox.maps.extension.compose.MapEffect
-import com.mapbox.maps.extension.compose.MapboxMap
-import com.mapbox.maps.extension.compose.animation.viewport.rememberMapViewportState
-import com.mapbox.maps.plugin.PuckBearing
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.app.ActivityCompat
+import android.location.Location as AndroidLocation            // ← Android-координата
+import com.mapbox.common.location.Location as MbxLocation     // ← Mapbox-координата
+import com.mapbox.api.directions.v5.models.RouteOptions
+import com.mapbox.geojson.Point
+import com.mapbox.maps.CameraOptions
+import com.mapbox.maps.EdgeInsets
+import com.mapbox.maps.MapView
+import com.mapbox.maps.plugin.LocationPuck2D
+import com.mapbox.maps.plugin.animation.camera
 import com.mapbox.maps.plugin.locationcomponent.createDefault2DPuck
 import com.mapbox.maps.plugin.locationcomponent.location
-import com.mapbox.maps.plugin.viewport.data.FollowPuckViewportStateOptions
-import com.mapbox.api.directions.v5.MapboxDirections
-import com.mapbox.api.directions.v5.models.DirectionsResponse
-import com.mapbox.geojson.LineString
-import com.mapbox.geojson.Point
-import com.mapbox.maps.plugin.annotation.annotations
-import com.mapbox.maps.plugin.annotation.generated.PolylineAnnotationOptions
-import com.mapbox.maps.plugin.annotation.generated.PolylineAnnotationManager
-import com.mapbox.maps.plugin.annotation.generated.createPolylineAnnotationManager
-import retrofit2.Call
-import retrofit2.Callback
-import retrofit2.Response
+import com.mapbox.navigation.base.ExperimentalPreviewMapboxNavigationAPI
+import com.mapbox.navigation.base.extensions.applyDefaultNavigationOptions
+import com.mapbox.navigation.base.options.NavigationOptions
+import com.mapbox.navigation.base.route.NavigationRoute
+import com.mapbox.navigation.base.route.NavigationRouterCallback
+import com.mapbox.navigation.base.route.RouterFailure
+import com.mapbox.navigation.core.MapboxNavigation
+import com.mapbox.navigation.core.directions.session.RoutesObserver
+import com.mapbox.navigation.core.lifecycle.MapboxNavigationApp
+import com.mapbox.navigation.core.lifecycle.MapboxNavigationObserver
+import com.mapbox.navigation.core.lifecycle.requireMapboxNavigation
+import com.mapbox.navigation.core.trip.session.LocationMatcherResult
+import com.mapbox.navigation.core.trip.session.LocationObserver
+import com.mapbox.navigation.ui.maps.camera.NavigationCamera
+import com.mapbox.navigation.ui.maps.camera.data.MapboxNavigationViewportDataSource
+import com.mapbox.navigation.ui.maps.location.NavigationLocationProvider
+import com.mapbox.navigation.ui.maps.route.line.api.MapboxRouteLineApi
+import com.mapbox.navigation.ui.maps.route.line.api.MapboxRouteLineView
+import com.mapbox.navigation.ui.maps.route.line.model.MapboxRouteLineApiOptions
+import com.mapbox.navigation.ui.maps.route.line.model.MapboxRouteLineViewOptions
 
-class MainActivity : ComponentActivity(), PermissionsListener {
+class MainActivity : ComponentActivity() {
 
-    lateinit var permissionsManager: PermissionsManager
+    /* ---------- Map & navigation helpers ---------- */
+    private lateinit var mapView: MapView
+    private lateinit var viewportDataSource: MapboxNavigationViewportDataSource
+    private lateinit var navigationCamera: NavigationCamera
+    private lateinit var routeLineApi: MapboxRouteLineApi
+    private lateinit var routeLineView: MapboxRouteLineView
+    private val navigationLocationProvider = NavigationLocationProvider()
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        var context = baseContext
-        var d = applicationContext
-        if (PermissionsManager.areLocationPermissionsGranted(context = d)) {
-            // Permission sensitive logic called here
-        } else {
-            permissionsManager = PermissionsManager(this)
-            permissionsManager.requestLocationPermissions(this)
+    /* ---------- UI elements ---------- */
+    private lateinit var destinationInput: EditText
+    private lateinit var okButton: Button
+    private lateinit var refreshButton: Button
+
+    /* ---------- Permissions ---------- */
+    private val locationPermissionRequest =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { perms ->
+            when {
+                perms[Manifest.permission.ACCESS_COARSE_LOCATION] == true -> initializeMapComponents()
+                perms[Manifest.permission.ACCESS_FINE_LOCATION] == true -> initializeMapComponents()
+                perms[Manifest.permission.ACCESS_BACKGROUND_LOCATION] == true -> initializeMapComponents()
+                else -> Toast
+                    .makeText(this, "Location permissions denied. Please enable them.", Toast.LENGTH_LONG)
+                    .show()
+            }
         }
+
+    /* ---------- Activity lifecycle ---------- */
+    override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        setContent {
-            MyAppContent()
-        }
-    }
-
-    @Composable
-    fun MyAppContent() {
-        var address by remember { mutableStateOf("") }
-        var routeActive by remember { mutableStateOf(false) }
-        var centerRequest by remember { mutableStateOf(0) }   // триггер для ресентра камеры
-        var destination by remember { mutableStateOf<Point?>(null) }
-        val context = LocalContext.current
-
-        Box(modifier = Modifier.fillMaxSize()) {
-
-            // =====  КАРТА  =====
-            MapContent(
-                modifier = Modifier.matchParentSize(),
-                routeActive = routeActive,
-                centerRequest = centerRequest,
-                destination = destination
-            )
-
-            // =====  ПОЛЕ ВВОДА + ОК  =====
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(start = 16.dp, end = 16.dp, bottom = 16.dp)
-                    .fillMaxWidth()
-            ) {
-                TextField(
-                    value = address,
-                    onValueChange = { address = it },
-                    placeholder = { Text("55.978074, 37.101952") },
-                    modifier = Modifier
-                        .weight(1f)
-                )
-                IconButton(
-                    onClick = {
-                        val parts = address.split(",").map { it.trim() }
-                        if (parts.size == 2) {
-                            try {
-                                val lat = parts[0].toDouble()
-                                val lon = parts[1].toDouble()
-                                destination = Point.fromLngLat(lon, lat)
-                                // здесь можно сохранить координаты в состояние / ViewModel
-                                routeActive = true
-                            } catch (e: Exception) {
-                                Toast.makeText(context, "Неверный формат координат", Toast.LENGTH_SHORT).show()
-                            }
-                        } else {
-                            Toast.makeText(context, "Введите координаты через запятую", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                ) {
-                    Icon(Icons.Filled.Check, contentDescription = "OK")
-                }
-            }
-
-            // =====  FAB «Местоположение»  =====
-            FloatingActionButton(
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(end = 16.dp, bottom = 88.dp),
-                onClick = {
-                    centerRequest += 1   // заставляем MapContent снова перей‑ти в FollowPuck
-                }
-            ) {
-                Icon(Icons.Filled.MyLocation, contentDescription = "Моё местоположение")
-            }
-
-            // =====  FAB «Завершить маршрут»  =====
-            if (routeActive) {
-                FloatingActionButton(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(end = 16.dp, bottom = 160.dp),   // выше кнопки локации
-                    onClick = {
-                        routeActive = false
-                        // здесь можно очистить маршрут из Mapbox
-                    }
-                ) {
-                    Icon(Icons.Filled.Close, contentDescription = "Завершить маршрут")
-                }
-            }
-        }
-    }
-
-
-    @Composable
-    fun MapContent(
-        modifier: Modifier = Modifier,
-        routeActive: Boolean,
-        centerRequest: Int,
-        destination: Point?
-    ) {
-        val mapViewportState = rememberMapViewportState()
-        val context = LocalContext.current
-        var polylineManager by remember { mutableStateOf<PolylineAnnotationManager?>(null) }
-        var routePoints by remember { mutableStateOf<List<Point>?>(null) }
-        var routeRequested by remember { mutableStateOf(false) }
-
-        LaunchedEffect(Unit) {
-            mapViewportState.transitionToFollowPuckState(
-                FollowPuckViewportStateOptions.Builder()
-                    .pitch(0.0)
-                    .build()
-            )
-        }
-        LaunchedEffect(centerRequest) {
-            mapViewportState.transitionToFollowPuckState(
-                FollowPuckViewportStateOptions.Builder()
-                    .pitch(0.0)
-                    .build()
-            )
-        }
-
-        MapboxMap(
-            modifier = modifier,
-            mapViewportState = mapViewportState,
+        if (ActivityCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
         ) {
-            MapEffect(routeActive, destination) { mapView ->
-                // --- Location puck settings ---
-                mapView.location.updateSettings {
-                    locationPuck = createDefault2DPuck(withBearing = true)
-                    enabled = true
-                    pulsingEnabled = true
-                    pulsingColor = Color.BLUE
-                    puckBearing = PuckBearing.HEADING
-                    puckBearingEnabled = true
-                }
-
-                // --- Init polyline manager once ---
-                if (polylineManager == null) {
-                    polylineManager = mapView.annotations.createPolylineAnnotationManager()
-                }
-                val mgr = polylineManager ?: return@MapEffect
-
-                // Clear previous drawings
-                mgr.deleteAll()
-
-                // Always reset decoded points when destination changes
-                if (!routeActive) {
-                    routePoints = null
-                    routeRequested = false
-                }
-
-                if (routeActive && destination != null) {
-                    // If we already have decoded points, just draw them
-                    if (routePoints != null) {
-                        val polyline = PolylineAnnotationOptions()
-                            .withPoints(routePoints!!)
-                            .withLineColor("#3B82F6")
-                            .withLineWidth(6.0)
-                        mgr.create(polyline)
-                    } else if (!routeRequested) {
-                        val latest = mapView.location.latestLocation
-                        if (latest != null) {
-                            routeRequested = true
-                            val origin = Point.fromLngLat(latest.longitude, latest.latitude)
-                            // Build Directions request
-                            val client = MapboxDirections.builder()
-                                .origin(origin)
-                                .destination(destination)
-                                .overview(DirectionsCriteria.OVERVIEW_FULL)
-                                .profile(DirectionsCriteria.PROFILE_DRIVING)
-                                .accessToken(mapView.context.getString(R.string.mapbox_access_token))
-                                .build()
-
-                            client.enqueueCall(object : Callback<DirectionsResponse> {
-                                override fun onResponse(
-                                    call: Call<DirectionsResponse>,
-                                    response: Response<DirectionsResponse>
-                                ) {
-                                    routeRequested = false
-                                    val route = response.body()?.routes()?.firstOrNull()
-                                    val geometry = route?.geometry()
-                                    if (geometry != null) {
-                                        val coords = LineString.fromPolyline(geometry, 6).coordinates()
-                                        routePoints = coords
-                                    }
-                                }
-
-                                override fun onFailure(call: Call<DirectionsResponse>, t: Throwable) {
-                                    routeRequested = false
-                                    // Could log or show a Toast with error
-                                }
-                            })
-                        }
-                    }
-                } else {
-                    // Reset when route is inactive
-                    routePoints = null
-                    routeRequested = false
-                }
-            }
+            initializeMapComponents()
+        } else {
+            locationPermissionRequest.launch(
+                arrayOf(
+                    Manifest.permission.ACCESS_COARSE_LOCATION,
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_BACKGROUND_LOCATION
+                )
+            )
         }
     }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        permissionsManager.onRequestPermissionsResult(requestCode, permissions, grantResults)
+    /* ---------- UI + Map init ---------- */
+    private fun initializeMapComponents() {
+        /* MapView */
+        mapView = MapView(this)
+        mapView.mapboxMap.setCamera(CameraOptions.Builder().zoom(14.0).build())
+
+        mapView.location.apply {
+            setLocationProvider(navigationLocationProvider)
+            locationPuck = LocationPuck2D()
+            enabled = true
+        }
+
+        /* Корневой layout */
+        val root = FrameLayout(this)
+        root.addView(
+            mapView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        /* Overlay: поле + кнопки */
+        val overlay = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.TOP
+            val pad = (16 * resources.displayMetrics.density).toInt()
+            setPadding(pad, pad, pad, 0)
+        }
+
+        destinationInput = EditText(this).apply {
+            hint = "lat,lng"
+            inputType = InputType.TYPE_CLASS_TEXT
+            layoutParams = LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+            )
+        }
+        okButton = Button(this).apply { text = "OK" }
+        refreshButton = Button(this).apply { text = "Refresh" }
+
+        overlay.addView(destinationInput)
+        overlay.addView(okButton)
+        overlay.addView(refreshButton)
+        root.addView(
+            overlay,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP
+            )
+        )
+        setContentView(root)
+
+        /* Viewport & camera */
+        viewportDataSource = MapboxNavigationViewportDataSource(mapView.mapboxMap)
+        val px = resources.displayMetrics.density
+        viewportDataSource.followingPadding =
+            EdgeInsets(180.0 * px, 40.0 * px, 150.0 * px, 40.0 * px)
+
+        navigationCamera = NavigationCamera(mapView.mapboxMap, mapView.camera, viewportDataSource)
+        routeLineApi = MapboxRouteLineApi(MapboxRouteLineApiOptions.Builder().build())
+        routeLineView = MapboxRouteLineView(MapboxRouteLineViewOptions.Builder(this).build())
+
+        /* ---------- Кнопка OK: строим маршрут ---------- */
+        okButton.setOnClickListener {
+            val parts = destinationInput.text.toString().trim().split(",")
+            if (parts.size != 2) {
+                Toast.makeText(this, "Введите координаты в формате lat,lng", Toast.LENGTH_LONG).show()
+                return@setOnClickListener
+            }
+            val lat = parts[0].trim().toDoubleOrNull()
+            val lng = parts[1].trim().toDoubleOrNull()
+            if (lat == null || lng == null) {
+                Toast.makeText(this, "Некорректные координаты", Toast.LENGTH_LONG).show()
+                return@setOnClickListener
+            }
+
+            fun buildRouteWith(loc: AndroidLocation) {
+                val origin = Point.fromLngLat(loc.longitude, loc.latitude)
+                val destination = Point.fromLngLat(lng, lat)
+                requestRoute(origin, destination)
+            }
+
+            navigationLocationProvider.lastLocation?.let { it1 -> buildRouteWith(it1) }
+                ?: waitForLocation { buildRouteWith(it) }
+        }
+
+        /* ---------- Кнопка Refresh: ждём локацию и центрируем камеру ---------- */
+        refreshButton.setOnClickListener {
+            fun focusOn(loc: AndroidLocation) {
+                mapView.mapboxMap.setCamera(
+                    CameraOptions.Builder()
+                        .center(Point.fromLngLat(loc.longitude, loc.latitude))
+                        .zoom(14.0)
+                        .build()
+                )
+                navigationCamera.requestNavigationCameraToFollowing()
+            }
+
+            navigationLocationProvider.lastLocation?.let { it -> focusOn(it) }
+                ?: waitForLocation { focusOn(it) }
+        }
     }
 
-    override fun onExplanationNeeded(permissionsToExplain: List<String>) {
-        // Реализуйте при необходимости
+    /* ---------- utility: ждём до получения первой позиции ---------- */
+    private fun waitForLocation(onReady: (AndroidLocation) -> Unit) {
+        val handler = Handler(Looper.getMainLooper())
+        val check = object : Runnable {
+            override fun run() {
+                navigationLocationProvider.lastLocation?.let { onReady(it) }
+                    ?: handler.postDelayed(this, 500)
+            }
+        }
+        handler.post(check)
     }
 
-    override fun onPermissionResult(granted: Boolean) {
-        // Реализуйте при необходимости
+    /* ---------- Observers ---------- */
+    private val routesObserver = RoutesObserver { result ->
+        if (result.navigationRoutes.isNotEmpty()) {
+            routeLineApi.setNavigationRoutes(result.navigationRoutes) { drawData ->
+                mapView.mapboxMap.style?.let { routeLineView.renderRouteDrawData(it, drawData) }
+            }
+            viewportDataSource.onRouteChanged(result.navigationRoutes.first())
+            viewportDataSource.evaluate()
+            navigationCamera.requestNavigationCameraToOverview()
+        }
+    }
+
+    private val locationObserver = object : LocationObserver {
+        override fun onNewRawLocation(rawLocation: MbxLocation) {}
+        override fun onNewLocationMatcherResult(matcherResult: LocationMatcherResult) {
+            val loc = matcherResult.enhancedLocation          // MbxLocation
+            navigationLocationProvider.changePosition(
+                location = loc,
+                keyPoints = matcherResult.keyPoints
+            )
+            viewportDataSource.onLocationChanged(loc)
+            viewportDataSource.evaluate()
+            navigationCamera.requestNavigationCameraToFollowing()
+        }
+    }
+
+    /* ---------- MapboxNavigation lifecycle ---------- */
+    @OptIn(ExperimentalPreviewMapboxNavigationAPI::class)
+    private val mapboxNavigation: MapboxNavigation by requireMapboxNavigation(
+        onResumedObserver = object : MapboxNavigationObserver {
+            @SuppressLint("MissingPermission")
+            override fun onAttached(mapboxNavigation: MapboxNavigation) {
+                mapboxNavigation.registerRoutesObserver(routesObserver)
+                mapboxNavigation.registerLocationObserver(locationObserver)
+            }
+            override fun onDetached(mapboxNavigation: MapboxNavigation) {}
+        },
+        onInitialize = this::initNavigation
+    )
+
+    @OptIn(ExperimentalPreviewMapboxNavigationAPI::class)
+    private fun initNavigation() {
+        MapboxNavigationApp.setup(NavigationOptions.Builder(this).build())
+        mapView.location.apply {
+            setLocationProvider(navigationLocationProvider)
+            locationPuck = createDefault2DPuck()
+            enabled = true
+        }
+    }
+
+    /* ---------- Запрос маршрута ---------- */
+    private fun requestRoute(origin: Point, destination: Point) {
+        mapboxNavigation.requestRoutes(
+            RouteOptions.builder()
+                .applyDefaultNavigationOptions()
+                .coordinatesList(listOf(origin, destination))
+                .layersList(listOf(mapboxNavigation.getZLevel(), null))
+                .build(),
+            object : NavigationRouterCallback {
+                override fun onCanceled(ro: RouteOptions, origin: String) {}
+                override fun onFailure(r: List<RouterFailure>, o: RouteOptions) {
+                    Toast.makeText(this@MainActivity, "Не удалось построить маршрут", Toast.LENGTH_LONG).show()
+                }
+                override fun onRoutesReady(routes: List<NavigationRoute>, origin: String) {
+                    mapboxNavigation.setNavigationRoutes(routes)
+                }
+            }
+        )
     }
 }
