@@ -1,0 +1,36 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Gradle Build",
+            "type": "shell",
+            "command": "./gradlew",
+            "args": ["build"],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Gradle Clean",
+            "type": "shell", 
+            "command": "./gradlew",
+            "args": ["clean"],
+            "group": "build"
+        },
+        {
+            "label": "Install Debug APK",
+            "type": "shell",
+            "command": "./gradlew",
+            "args": ["installDebug"],
+            "group": "build"
+        }
+    ]
+} 

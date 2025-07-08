@@ -1,0 +1,160 @@
+Я помогу вам разобраться с проблемой отсутствия зависимостей Android SDK в Cursor. Давайте посмотрим на конфигурацию проекта и найдем решение.
+Read file: build.gradle.kts
+Read file: app/build.gradle.kts
+Read file: gradle/libs.versions.toml
+Read file: settings.gradle.kts
+
+Read file: gradle.properties
+Read file: app/src/main/java/com/example/myapplication/MainActivity.kt
+
+Ran tool
+Ran tool
+
+Read file: local.properties
+
+## План решения проблемы
+
+Проблема в том, что Cursor (основанный на VS Code) не имеет встроенной поддержки Android разработки в отличие от Android Studio. Нужно настроить IDE для работы с Android проектом.
+
+**План по пунктам:**
+1. Создать конфигурацию VS Code/Cursor для Android разработки
+2. Настроить переменные окружения для Android SDK  
+3. Добавить настройки Kotlin Language Server
+4. Проверить и исправить настройки Gradle
+
+## Реализация
+
+```json:.vscode/settings.json
+{
+    "java.configuration.updateBuildConfiguration": "automatic",
+    "java.compile.nullAnalysis.mode": "automatic",
+    "java.import.gradle.enabled": true,
+    "java.import.gradle.wrapper.enabled": true,
+    "java.import.gradle.java.home": null,
+    "kotlin.languageServer.enabled": true,
+    "kotlin.languageServer.path": "",
+    "kotlin.compiler.jvm.target": "11",
+    "files.exclude": {
+        "**/.gradle": true,
+        "**/build": true,
+        "**/.kotlin": true
+    },
+    "java.project.sourcePaths": [
+        "app/src/main/java",
+        "app/src/test/java",
+        "app/src/androidTest/java"
+    ],
+    "java.project.referencedLibraries": {
+        "include": [
+            "**/*.jar"
+        ],
+        "exclude": [
+            "**/build/**",
+            "**/.gradle/**"
+        ]
+    },
+    "terminal.integrated.env.osx": {
+        "ANDROID_HOME": "/Users/admin/Library/Android/sdk",
+        "ANDROID_SDK_ROOT": "/Users/admin/Library/Android/sdk",
+        "PATH": "${env:PATH}:/Users/admin/Library/Android/sdk/platform-tools:/Users/admin/Library/Android/sdk/tools"
+    },
+    "terminal.integrated.env.linux": {
+        "ANDROID_HOME": "/Users/admin/Library/Android/sdk",
+        "ANDROID_SDK_ROOT": "/Users/admin/Library/Android/sdk", 
+        "PATH": "${env:PATH}:/Users/admin/Library/Android/sdk/platform-tools:/Users/admin/Library/Android/sdk/tools"
+    }
+}
+```
+
+```json:.vscode/tasks.json
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Gradle Build",
+            "type": "shell",
+            "command": "./gradlew",
+            "args": ["build"],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Gradle Clean",
+            "type": "shell", 
+            "command": "./gradlew",
+            "args": ["clean"],
+            "group": "build"
+        },
+        {
+            "label": "Install Debug APK",
+            "type": "shell",
+            "command": "./gradlew",
+            "args": ["installDebug"],
+            "group": "build"
+        }
+    ]
+}
+```
+
+```gradle.properties
+# Project-wide Gradle settings.
+# IDE (e.g. Android Studio) users:
+# Gradle settings configured through the IDE *will override*
+# any settings specified in this file.
+# For more details on how to configure your build environment visit
+# http://www.gradle.org/docs/current/userguide/build_environment.html
+# Specifies the JVM arguments used for the daemon process.
+# The setting is particularly useful for tweaking memory settings.
+org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+# When configured, Gradle will run in incubating parallel mode.
+# This option should only be used with decoupled projects. For more details, visit
+# https://developer.android.com/r/tools/gradle-multi-project-decoupled-projects
+org.gradle.parallel=true
+# AndroidX package structure to make it clearer which packages are bundled with the
+# Android operating system, and which are packaged with your app's APK
+# https://developer.android.com/topic/libraries/support-library/androidx-rn
+android.useAndroidX=true
+# Kotlin code style for this project: "official" or "obsolete":
+kotlin.code.style=official
+# Enables namespacing of each library's R class so that its R class includes only the
+# resources declared in the library itself and none from the library's dependencies,
+# thereby reducing the size of the R class for that library
+android.nonTransitiveRClass=true
+# Enable Gradle configuration cache
+org.gradle.configuration-cache=true
+# Enable Gradle build cache
+org.gradle.caching=true
+MAPBOX_DOWNLOADS_TOKEN=sk.eyJ1IjoiZC1nZW5lemlzLWIiLCJhIjoiY21iY2ZvczE5MW1xdzJrcDl5M2Z5eWRwYiJ9.ooNs4qMvvw2kjkYj6csIuQ
+```
+
+**Дополнительные шаги:**
+
+1. **Установите расширения для Cursor:**
+   - Kotlin Language Support
+   - Gradle for Java
+   - Android iOS Build Debug
+
+2. **Перезапустите Cursor** после создания файлов конфигурации
+
+3. **Выполните в терминале:**
+```bash
+./gradlew clean build
+```
+
+4. **Добавьте переменные окружения в ~/.zshrc:**
+```bash
+export ANDROID_HOME=/Users/admin/Library/Android/sdk
+export ANDROID_SDK_ROOT=/Users/admin/Library/Android/sdk
+export PATH=$PATH:$ANDROID_HOME/platform-tools:$ANDROID_HOME/tools
+```
+
+Эти изменения настроят Cursor для корректной работы с Android проектом, включая поддержку зависимостей androidx и android SDK.

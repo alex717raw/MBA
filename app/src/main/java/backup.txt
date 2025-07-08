@@ -1,0 +1,451 @@
+package com.example.myapplication
+
+import android.Manifest
+import android.annotation.SuppressLint
+import android.content.pm.PackageManager
+import android.os.Bundle
+import android.view.Gravity
+import android.widget.Button
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.app.ActivityCompat
+import com.mapbox.api.directions.v5.models.RouteOptions
+import com.mapbox.common.location.Location
+import com.mapbox.geojson.Point
+import com.mapbox.maps.CameraOptions
+import com.mapbox.maps.EdgeInsets
+import com.mapbox.maps.MapView
+import com.mapbox.maps.plugin.LocationPuck2D
+import com.mapbox.maps.plugin.animation.camera
+import com.mapbox.maps.plugin.locationcomponent.createDefault2DPuck
+import com.mapbox.maps.plugin.locationcomponent.location
+import com.mapbox.navigation.base.ExperimentalPreviewMapboxNavigationAPI
+import com.mapbox.navigation.base.extensions.applyDefaultNavigationOptions
+import com.mapbox.navigation.base.options.NavigationOptions
+import com.mapbox.navigation.base.route.NavigationRoute
+import com.mapbox.navigation.base.route.NavigationRouterCallback
+import com.mapbox.navigation.base.route.RouterFailure
+import com.mapbox.navigation.core.MapboxNavigation
+import com.mapbox.navigation.core.directions.session.RoutesObserver
+import com.mapbox.navigation.core.lifecycle.MapboxNavigationApp
+import com.mapbox.navigation.core.lifecycle.MapboxNavigationObserver
+import com.mapbox.navigation.core.lifecycle.requireMapboxNavigation
+import com.mapbox.navigation.core.replay.route.ReplayProgressObserver
+import com.mapbox.navigation.core.replay.route.ReplayRouteMapper
+import com.mapbox.navigation.core.trip.session.LocationMatcherResult
+import com.mapbox.navigation.core.trip.session.LocationObserver
+import com.mapbox.navigation.ui.maps.camera.NavigationCamera
+import com.mapbox.navigation.ui.maps.camera.data.MapboxNavigationViewportDataSource
+import com.mapbox.navigation.ui.maps.location.NavigationLocationProvider
+import com.mapbox.navigation.ui.maps.route.line.api.MapboxRouteLineApi
+import com.mapbox.navigation.ui.maps.route.line.api.MapboxRouteLineView
+import com.mapbox.navigation.ui.maps.route.line.model.MapboxRouteLineApiOptions
+import com.mapbox.navigation.ui.maps.route.line.model.MapboxRouteLineViewOptions
+import android.text.InputType
+import android.view.View
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.textfield.TextInputEditText
+import com.google.android.material.textfield.TextInputLayout
+import android.content.res.ColorStateList
+import com.mapbox.maps.plugin.gestures.OnMoveListener
+import com.mapbox.maps.plugin.gestures.gestures
+import com.mapbox.maps.plugin.locationcomponent.LocationComponentPlugin
+import com.mapbox.maps.plugin.PuckBearing
+import android.os.Handler
+import android.os.Looper
+import com.mapbox.maps.plugin.viewport.viewport
+import com.mapbox.maps.plugin.viewport.data.FollowPuckViewportStateBearing
+import android.graphics.Color
+import android.widget.LinearLayout
+
+class MainActivity : ComponentActivity() {
+    private lateinit var mapView: MapView
+    private lateinit var viewportDataSource: MapboxNavigationViewportDataSource
+    private lateinit var navigationCamera: NavigationCamera
+    private lateinit var routeLineApi: MapboxRouteLineApi
+    private lateinit var routeLineView: MapboxRouteLineView
+    private lateinit var replayProgressObserver: ReplayProgressObserver
+    private val navigationLocationProvider = NavigationLocationProvider()
+    private val replayRouteMapper = ReplayRouteMapper()
+    private lateinit var refreshButton: MaterialButton
+    private lateinit var goButton: MaterialButton
+    private lateinit var cancelButton: MaterialButton
+    private lateinit var coordInputLayout: TextInputLayout
+    private lateinit var coordEditText: TextInputEditText
+    private var currentUserPoint: Point? = null
+    private var isRouteActive = false
+    private var isFollowing = false
+    private var followTimerHandler: Handler? = null
+    private var followTimerRunnable: Runnable? = null
+
+    // Activity result launcher for location permissions
+    private val locationPermissionRequest =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+                permissions ->
+            when {
+                permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true -> {
+                    getUserLocationAndInit()
+                }
+                else -> {
+                    Toast.makeText(
+                        this,
+                        "Location permissions denied. Please enable permissions in settings.",
+                        Toast.LENGTH_LONG
+                    )
+                        .show()
+                }
+            }
+        }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        // check/request location permissions
+        if (
+            ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            getUserLocationAndInit()
+        } else {
+            locationPermissionRequest.launch(arrayOf(Manifest.permission.ACCESS_COARSE_LOCATION))
+        }
+    }
+
+    private fun getUserLocationAndInit() {
+        // Включаем временный MapView для получения позиции
+        val tempMapView = MapView(this)
+        tempMapView.location.enabled = true
+        tempMapView.location.addOnIndicatorPositionChangedListener { point ->
+            tempMapView.location.enabled = false
+            tempMapView.onStop()
+            tempMapView.onDestroy()
+            currentUserPoint = point
+            runOnUiThread {
+                initializeMapComponents(point)
+            }
+        }
+        // Таймаут на ошибку (например, если позиция не получена за 5 сек)
+        tempMapView.postDelayed({
+            if (currentUserPoint == null) {
+                val moscow = Point.fromLngLat(37.618423, 55.751244)
+                Toast.makeText(this, "Ошибка получения геопозиции, центр на Москве", Toast.LENGTH_LONG).show()
+                initializeMapComponents(moscow)
+            }
+        }, 5000)
+    }
+
+    private fun initializeMapComponents(centerPoint: Point) {
+        mapView = MapView(this)
+        mapView.mapboxMap.setCamera(
+            CameraOptions.Builder()
+                .center(centerPoint)
+                .zoom(15.0)
+                .build()
+        )
+        // Синий кружок пользователя (стандартный Material LocationPuck)
+        mapView.location.updateSettings {
+            enabled = true
+            locationPuck = createDefault2DPuck(withBearing = true)
+            pulsingEnabled = true
+        }
+        mapView.location.addOnIndicatorPositionChangedListener { point ->
+            currentUserPoint = point
+        }
+        // Слушатель жестов для сброса слежения и запуска таймера
+        mapView.gestures.addOnMoveListener(object : OnMoveListener {
+            override fun onMoveBegin(detector: com.mapbox.android.gestures.MoveGestureDetector) {
+                stopFollowing()
+                startFollowTimer()
+            }
+            override fun onMove(detector: com.mapbox.android.gestures.MoveGestureDetector): Boolean = false
+            override fun onMoveEnd(detector: com.mapbox.android.gestures.MoveGestureDetector) {}
+        })
+        // UI
+        val frameLayout = FrameLayout(this)
+        frameLayout.layoutParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        )
+        frameLayout.addView(mapView)
+        // TextInputLayout + TextInputEditText
+        coordEditText = TextInputEditText(this).apply {
+            hint = "lat, lng"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setSingleLine(true)
+            // Цвет текста и hint берутся из темы Material
+        }
+        coordInputLayout = TextInputLayout(this, null, com.google.android.material.R.style.Widget_Material3_TextInputLayout_OutlinedBox).apply {
+            boxBackgroundMode = TextInputLayout.BOX_BACKGROUND_OUTLINE
+            // Цвета рамки и hint берутся из темы Material, кастомные не задаём
+            setPadding(0,0,0,0)
+            addView(coordEditText)
+        }
+        val editParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            topMargin = (resources.displayMetrics.heightPixels * 0.05).toInt()
+            leftMargin = (resources.displayMetrics.widthPixels * 0.05).toInt()
+            rightMargin = (resources.displayMetrics.widthPixels * 0.05).toInt()
+            gravity = Gravity.TOP
+        }
+        frameLayout.addView(coordInputLayout, editParams)
+        // Кнопки в вертикальном LinearLayout
+        val buttonLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val buttonParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            gravity = Gravity.BOTTOM or Gravity.END
+            val margin = (resources.displayMetrics.widthPixels * 0.05).toInt()
+            bottomMargin = margin
+            rightMargin = margin
+        }
+        // Go button
+        goButton = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            text = "Go"
+            backgroundTintList = ColorStateList.valueOf(0xFFF79E05.toInt())
+            setTextColor(0xFFFFFFFF.toInt())
+            cornerRadius = 32
+        }
+        // Refresh button
+        refreshButton = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            text = "Refresh"
+            backgroundTintList = ColorStateList.valueOf(0xFFF79E05.toInt())
+            setTextColor(0xFFFFFFFF.toInt())
+            cornerRadius = 32
+        }
+        // Cancel button
+        cancelButton = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            text = "Cancel"
+            backgroundTintList = ColorStateList.valueOf(0xFFF79E05.toInt())
+            setTextColor(0xFFFFFFFF.toInt())
+            cornerRadius = 32
+        }
+        // Добавляем кнопки в колонку с отступами
+        val btnMargin = (resources.displayMetrics.heightPixels * 0.01).toInt()
+        val lp = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = btnMargin }
+        buttonLayout.addView(goButton, lp)
+        buttonLayout.addView(refreshButton, lp)
+        buttonLayout.addView(cancelButton, lp)
+        frameLayout.addView(buttonLayout, buttonParams)
+        setContentView(frameLayout)
+        // viewportDataSource и navigationCamera нужны для навигации
+        viewportDataSource = MapboxNavigationViewportDataSource(mapView.mapboxMap)
+        val pixelDensity = this.resources.displayMetrics.density
+        viewportDataSource.followingPadding =
+            EdgeInsets(
+                180.0 * pixelDensity,
+                40.0 * pixelDensity,
+                150.0 * pixelDensity,
+                40.0 * pixelDensity
+            )
+        navigationCamera = NavigationCamera(mapView.mapboxMap, mapView.camera, viewportDataSource)
+        // инициализация routeLineApi и routeLineView
+        routeLineApi = MapboxRouteLineApi(MapboxRouteLineApiOptions.Builder().build())
+        routeLineView = MapboxRouteLineView(MapboxRouteLineViewOptions.Builder(this).build())
+        // listeners
+        refreshButton.setOnClickListener { refreshUserLocation() }
+        goButton.setOnClickListener { onGoClicked() }
+        cancelButton.setOnClickListener { onCancelClicked() }
+    }
+
+    // routes observer draws a route line and origin/destination circles on the map
+    private val routesObserver = RoutesObserver { routeUpdateResult ->
+        if (routeUpdateResult.navigationRoutes.isNotEmpty()) {
+            // generate route geometries asynchronously and render them
+            routeLineApi.setNavigationRoutes(routeUpdateResult.navigationRoutes) { value ->
+                mapView.mapboxMap.style?.apply { routeLineView.renderRouteDrawData(this, value) }
+            }
+
+            // update viewportSourceData to include the new route
+            viewportDataSource.onRouteChanged(routeUpdateResult.navigationRoutes.first())
+            viewportDataSource.evaluate()
+
+            // set the navigationCamera to OVERVIEW
+            navigationCamera.requestNavigationCameraToOverview()
+        }
+    }
+
+    // locationObserver updates the location puck and camera to follow the user's location
+    private val locationObserver =
+        object : LocationObserver {
+            override fun onNewRawLocation(rawLocation: Location) {}
+
+            override fun onNewLocationMatcherResult(locationMatcherResult: LocationMatcherResult) {
+                val enhancedLocation = locationMatcherResult.enhancedLocation
+                navigationLocationProvider.changePosition(
+                    location = enhancedLocation,
+                    keyPoints = locationMatcherResult.keyPoints,
+                )
+                viewportDataSource.onLocationChanged(enhancedLocation)
+                viewportDataSource.evaluate()
+                navigationCamera.requestNavigationCameraToFollowing()
+            }
+        }
+
+    // define MapboxNavigation
+    @OptIn(ExperimentalPreviewMapboxNavigationAPI::class)
+    private val mapboxNavigation: MapboxNavigation by
+    requireMapboxNavigation(
+        onResumedObserver =
+        object : MapboxNavigationObserver {
+            override fun onAttached(mapboxNavigation: MapboxNavigation) {}
+            override fun onDetached(mapboxNavigation: MapboxNavigation) {}
+        },
+        onInitialize = this::initNavigation
+    )
+
+    // on initialization of MapboxNavigation, только инициализация, без маршрута и эмуляции
+    @OptIn(ExperimentalPreviewMapboxNavigationAPI::class)
+    private fun initNavigation() {
+        MapboxNavigationApp.setup(NavigationOptions.Builder(this).build())
+        // location puck уже включён через mapView.location.enabled = true
+    }
+
+    private fun onGoClicked() {
+        val input = coordEditText.text.toString().replace(" ", "")
+        val parts = input.split(",")
+        if (parts.size != 2) {
+            Toast.makeText(this, "Введите координаты lat, lng", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val lat = parts[0].toDoubleOrNull()
+        val lng = parts[1].toDoubleOrNull()
+        if (lat == null || lng == null || lat !in -90.0..90.0 || lng !in -180.0..180.0) {
+            Toast.makeText(this, "Некорректные координаты", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val user = currentUserPoint
+        if (user == null) {
+            Toast.makeText(this, "Геопозиция пользователя не определена", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val dest = Point.fromLngLat(lng, lat)
+        buildRoute(user, dest)
+        coordEditText.setText("")
+        startFollowing() // включаем слежение и зум 10
+    }
+
+    private fun buildRoute(origin: Point, dest: Point) {
+        val nav = mapboxNavigation
+        nav.requestRoutes(
+            RouteOptions.builder()
+                .applyDefaultNavigationOptions()
+                .coordinatesList(listOf(origin, dest))
+                .build(),
+            object : NavigationRouterCallback {
+                override fun onCanceled(routeOptions: RouteOptions, routerOrigin: String) {
+                    runOnUiThread {
+                        Toast.makeText(this@MainActivity, "Построение маршрута отменено", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                override fun onFailure(reasons: List<RouterFailure>, routeOptions: RouteOptions) {
+                    runOnUiThread {
+                        Toast.makeText(this@MainActivity, "Ошибка построения маршрута", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                override fun onRoutesReady(routes: List<NavigationRoute>, routerOrigin: String) {
+                    runOnUiThread {
+                        if (routes.isNotEmpty()) {
+                            nav.setNavigationRoutes(routes)
+                            isRouteActive = true
+                            viewportDataSource.onRouteChanged(routes.first())
+                            viewportDataSource.evaluate()
+                            navigationCamera.requestNavigationCameraToFollowing()
+                            // ОТРИСОВКА ЛИНИИ МАРШРУТА
+                            routeLineApi.setNavigationRoutes(routes) { value ->
+                                mapView.mapboxMap.getStyle { style ->
+                                    routeLineView.renderRouteDrawData(style, value)
+                                }
+                            }
+                            Toast.makeText(this@MainActivity, "Маршрут построен", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(this@MainActivity, "Маршрут не найден", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            }
+        )
+    }
+
+    private fun onCancelClicked() {
+        if (isRouteActive) {
+            mapboxNavigation.setNavigationRoutes(emptyList())
+            isRouteActive = false
+            // СБРОС ЛИНИИ МАРШРУТА
+            routeLineApi.clearRouteLine { value ->
+                mapView.mapboxMap.getStyle { style ->
+                    routeLineView.renderClearRouteLineValue(style, value)
+                }
+            }
+            val user = currentUserPoint
+            if (user != null) {
+                mapView.mapboxMap.setCamera(
+                    CameraOptions.Builder().center(user).zoom(15.0).build()
+                )
+                Toast.makeText(this, "Маршрут удалён", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun refreshUserLocation() {
+        try {
+            val point = currentUserPoint
+            if (point != null) {
+                mapView.mapboxMap.setCamera(
+                    CameraOptions.Builder()
+                        .center(point)
+                        .zoom(15.0)
+                        .build()
+                )
+                Toast.makeText(this, "Карта центрирована на пользователе", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "Геопозиция недоступна", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            Toast.makeText(this, "Ошибка обновления позиции: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun startFollowing() {
+        val user = currentUserPoint
+        if (user != null) {
+            val followState = mapView.viewport.makeFollowPuckViewportState()
+            mapView.viewport.transitionTo(followState)
+            // Программно выставляем зум
+            mapView.mapboxMap.setCamera(
+                CameraOptions.Builder().zoom(10.0).build()
+            )
+            isFollowing = true
+        }
+    }
+
+    private fun stopFollowing() {
+        isFollowing = false
+        // Можно добавить логику для выхода из follow, если нужно
+    }
+
+    private fun startFollowTimer() {
+        if (followTimerRunnable != null) followTimerHandler?.removeCallbacks(followTimerRunnable!!)
+        if (followTimerHandler == null) followTimerHandler = Handler(Looper.getMainLooper())
+        followTimerRunnable = Runnable {
+            if (!isFollowing) {
+                startFollowing()
+            }
+        }
+        followTimerHandler?.postDelayed(followTimerRunnable!!, 15000)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        if (followTimerRunnable != null) followTimerHandler?.removeCallbacks(followTimerRunnable!!)
+    }
+}

@@ -1,0 +1,43 @@
+{
+    "java.configuration.updateBuildConfiguration": "automatic",
+    "java.compile.nullAnalysis.mode": "automatic",
+    "java.import.gradle.enabled": true,
+    "java.import.gradle.wrapper.enabled": true,
+    "java.import.gradle.offline.enabled": false,
+    "java.import.gradle.user.home": null,
+    "kotlin.languageServer.enabled": true,
+    "kotlin.trace.server": "verbose",
+    "android.home": "/Users/admin/Library/Android/sdk",
+    "java.project.sourcePaths": [
+        "app/src/main/java",
+        "app/src/main/kotlin"
+    ],
+    "java.project.outputPath": "app/build/classes",
+    "java.project.referencedLibraries": {
+        "include": [
+            "**/*.jar",
+            "app/build/intermediates/compile_and_runtime_not_namespaced_r_class_jar/**/*.jar"
+        ],
+        "exclude": [
+            "**/build/**",
+            "**/.gradle/**"
+        ]
+    },
+    "terminal.integrated.env.osx": {
+        "ANDROID_HOME": "/Users/admin/Library/Android/sdk",
+        "ANDROID_SDK_ROOT": "/Users/admin/Library/Android/sdk",
+        "JAVA_HOME": "/Library/Java/JavaVirtualMachines/jdk-11.jdk/Contents/Home",
+        "PATH": "${env:PATH}:/Users/admin/Library/Android/sdk/platform-tools:/Users/admin/Library/Android/sdk/tools"
+    },
+    "terminal.integrated.env.linux": {
+        "ANDROID_HOME": "/Users/admin/Library/Android/sdk",
+        "ANDROID_SDK_ROOT": "/Users/admin/Library/Android/sdk", 
+        "PATH": "${env:PATH}:/Users/admin/Library/Android/sdk/platform-tools:/Users/admin/Library/Android/sdk/tools"
+    },
+    "files.exclude": {
+        "**/.gradle": true,
+        "**/build": true,
+        "**/.kotlin": true,
+        "**/*.class": true
+    }
+} 
